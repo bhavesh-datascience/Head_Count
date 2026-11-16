@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Person Counter</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1d2330; --muted:#6b7280; --accent:#2563eb; --border:#e3e6eb; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--text); }
+  main { max-width: 960px; margin: 0 auto; padding: 32px 16px; }
+  h1 { margin: 0 0 4px; font-size: 1.6rem; }
+  p.sub { margin: 0 0 24px; color: var(--muted); }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:20px; margin-bottom:20px; }
+  #drop { border:2px dashed var(--border); border-radius:10px; padding:32px; text-align:center; cursor:pointer; color:var(--muted); }
+  #drop.over { border-color: var(--accent); color: var(--accent); }
+  .row { display:flex; gap:16px; align-items:center; flex-wrap:wrap; margin-top:16px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 20px; font-size:1rem; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  .count { font-size: 3rem; font-weight: 700; color: var(--accent); line-height: 1; }
+  img { max-width:100%; border-radius:8px; display:block; margin-top:12px; }
+  pre { background:#0f172a; color:#e2e8f0; padding:12px; border-radius:8px; overflow:auto; max-height:300px; font-size:.8rem; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Person Counter</h1>
+  <p class="sub">Upload an image to count every person in it. <a href="/docs">API docs</a></p>
+
+  <div class="card">
+    <div id="drop">Click or drop an image here</div>
+    <input type="file" id="file" accept="image/*" hidden>
+    <div class="row">
+      <label><input type="checkbox" id="tiles" checked> Crowd mode (tiled pass for small people)</label>
+      <button id="go" disabled>Count persons</button>
+      <span id="status" class="muted"></span>
+    </div>
+  </div>
+
+  <div class="card" id="result" hidden>
+    <div class="muted">Total persons</div>
+    <div class="count" id="count">0</div>
+    <img id="out" alt="Annotated result">
+    <details style="margin-top:12px"><summary>JSON response</summary><pre id="json"></pre></details>
+  </div>
+</main>
+<script>
+const drop = document.getElementById('drop'), input = document.getElementById('file');
+const go = document.getElementById('go'), status = document.getElementById('status');
+let file = null;
+
+function pick(f) {
+  if (!f || !f.type.startsWith('image/')) return;
+  file = f; drop.textContent = f.name; go.disabled = false;
+}
+drop.onclick = () => input.click();
+input.onchange = () => pick(input.files[0]);
+drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); pick(e.dataTransfer.files[0]); };
+
+go.onclick = async () => {
+  go.disabled = true; status.textContent = 'Detecting...';
+  const fd = new FormData(); fd.append('file', file);
+  const tiles = document.getElementById('tiles').checked;
+  const t0 = performance.now();
+  try {
+    const r = await fetch(`/count?annotated=true&tiles=${tiles}`, { method: 'POST', body: fd });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    document.getElementById('count').textContent = data.total_persons;
+    document.getElementById('out').src = data.annotated_image;
+    const { annotated_image, ...rest } = data;
+    document.getElementById('json').textContent = JSON.stringify(rest, null, 2);
+    document.getElementById('result').hidden = false;
+    status.textContent = `Done in ${((performance.now() - t0) / 1000).toFixed(2)}s`;
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  } finally {
+    go.disabled = false;
+  }
+};
+</script>
+</body>
+</html>
