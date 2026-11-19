@@ -50,7 +50,12 @@ def ort_cuda_available() -> bool:
 def ort_providers(cfg: UniqueCountConfig) -> tuple[list, int]:
     """ONNX Runtime providers + InsightFace ctx_id (-1 = CPU)."""
     init_cuda_runtime()
-    if ort_cuda_available():
+    # onnxruntime-gpu lists the CUDA provider even on machines with no usable
+    # GPU; check for a real device first so we fall back to CPU cleanly
+    # instead of ORT printing EP errors and retrying.
+    if ort_cuda_available() and not torch_cuda_available():
+        logger.warning("No CUDA GPU detected - running face models on CPU (much slower)")
+    elif ort_cuda_available():
         opts: dict[str, object] = {
             "device_id": cfg.gpu_device_id,
             # Grow the arena only by what is requested -> lower peak memory.
