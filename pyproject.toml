@@ -6,9 +6,31 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.162.0",
+    "insightface>=2.1",
     "numpy>=2.5.4",
+    "onnxruntime-gpu[cuda,cudnn]>=1.32.0",
     "opencv-python>=5.0.0.93",
     "python-multipart>=0.0.32",
+    "scikit-learn>=1.9.1",
+    "torch>=2.14.1",
+    "torchvision>=0.29.1",
     "ultralytics>=8.4.189",
     "uvicorn[standard]>=0.54.0",
 ]
+
+[tool.uv]
+# insightface depends on the CPU-only "onnxruntime" package, which installs the
+# same "onnxruntime" module as "onnxruntime-gpu" and would overwrite it.
+# This marker never matches, so the CPU package is dropped and
+# onnxruntime-gpu (CUDA 13) provides the module instead.
+override-dependencies = ["onnxruntime; sys_platform == 'never'"]
+
+# CUDA 13.0 builds of PyTorch (needed for RTX 50-series / Blackwell, sm_120).
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu130" }]
+torchvision = [{ index = "pytorch-cu130" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true

@@ -10,6 +10,7 @@ Strategy:
 """
 
 import os
+import threading
 from dataclasses import dataclass
 
 import numpy as np
@@ -84,6 +85,10 @@ class PersonDetector:
         self.cfg = config or DetectorConfig()
         self.device = 0 if torch.cuda.is_available() else "cpu"
         self.model = YOLO(self.cfg.model_path)
+        # The Ultralytics predictor keeps per-call state and is not safe to use
+        # from several threads at once; /count, /number-count and /unique-count
+        # share this instance, so calls are serialised.
+        self._lock = threading.Lock()
 
     def _predict(self, images, imgsz: int):
         return self.model.predict(
@@ -98,7 +103,11 @@ class PersonDetector:
         )
 
     def detect(self, image: np.ndarray, use_tiles: bool | None = None) -> list[dict]:
-        """image: BGR numpy array. Returns list of {box: [x1,y1,x2,y2], confidence}."""
+        """image: BGR numpy array. Returns list of {box: [x1,y1,x2,y2], confidence}. Thread-safe."""
+        with self._lock:
+            return self._detect(image, use_tiles)
+
+    def _detect(self, image: np.ndarray, use_tiles: bool | None = None) -> list[dict]:
         use_tiles = self.cfg.use_tiles if use_tiles is None else use_tiles
         h, w = image.shape[:2]
         all_boxes, all_scores = [], []

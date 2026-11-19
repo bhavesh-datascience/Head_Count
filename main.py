@@ -9,6 +9,8 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 
 from detector import PersonDetector
+from routes.unique_count import router as unique_count_router
+from services.unique_count_service import shutdown_runtime, start_runtime
 
 BASE_DIR = Path(__file__).parent
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
@@ -20,10 +22,16 @@ detector: PersonDetector | None = None
 async def lifespan(app: FastAPI):
     global detector
     detector = PersonDetector()
+    # Shared with /unique-count so the YOLO model is loaded only once.
+    app.state.person_detector = detector
+    # Starts the /unique-count GPU worker and warms its models up in the background.
+    start_runtime(detector)
     yield
+    shutdown_runtime()
 
 
 app = FastAPI(title="Person Counter", version="1.0.0", lifespan=lifespan)
+app.include_router(unique_count_router)
 
 
 def annotate(image: np.ndarray, detections: list[dict]) -> str:
@@ -94,4 +102,4 @@ async def count_persons(
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("main:app", host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8001)
