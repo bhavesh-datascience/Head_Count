@@ -18,6 +18,11 @@ import torch
 from ultralytics import YOLO
 
 PERSON_CLASS = 0
+_HAS_CUDA = torch.cuda.is_available()
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -27,10 +32,14 @@ class DetectorConfig:
     nms_iou: float = 0.60       # high => overlapping people are not merged
     merge_iou: float = 0.55     # IoU for merging full-image + tile detections
     merge_ios: float = 0.85     # intersection / smaller-box area for dedup
-    imgsz: int = 1280
+    imgsz: int = int(os.getenv("PERSON_IMGSZ", "1280"))
     tile_size: int = 640
     tile_overlap: float = 0.25
-    use_tiles: bool = True
+    use_tiles: bool = _env_bool("PERSON_TILES", True)
+    # Tiles sent to the model per forward pass. A 12 MP photo has ~48 tiles;
+    # running them in one batch needed ~6 GB, so they go in small chunks
+    # (results are identical, peak memory is bounded).
+    tile_batch: int = int(os.getenv("PERSON_TILE_BATCH", "16" if _HAS_CUDA else "2"))
 
 
 def _iou_and_ios(box: np.ndarray, boxes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -83,7 +92,7 @@ def _tiles(w: int, h: int, size: int, overlap: float):
 class PersonDetector:
     def __init__(self, config: DetectorConfig | None = None):
         self.cfg = config or DetectorConfig()
-        self.device = 0 if torch.cuda.is_available() else "cpu"
+        self.device = 0 if _HAS_CUDA else "cpu"
         self.model = YOLO(self.cfg.model_path)
         # The Ultralytics predictor keeps per-call state and is not safe to use
         # from several threads at once; /count, /number-count and /unique-count
@@ -120,7 +129,11 @@ class PersonDetector:
         if use_tiles and max(w, h) > self.cfg.tile_size * 1.5:
             tiles = list(_tiles(w, h, self.cfg.tile_size, self.cfg.tile_overlap))
             crops = [image[y1:y2, x1:x2] for x1, y1, x2, y2 in tiles]
-            for (x1, y1, x2, y2), r in zip(tiles, self._predict(crops, self.cfg.tile_size)):
+            step = max(1, self.cfg.tile_batch)
+            results = []
+            for i in range(0, len(crops), step):
+                results.extend(self._predict(crops[i:i + step], self.cfg.tile_size))
+            for (x1, y1, x2, y2), r in zip(tiles, results):
                 b = r.boxes.xyxy.cpu().numpy()
                 s = r.boxes.conf.cpu().numpy()
                 if not len(b):

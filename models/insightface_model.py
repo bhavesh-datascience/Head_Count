@@ -28,7 +28,7 @@ class InsightFaceModel:
     def __init__(self, cfg: UniqueCountConfig):
         from insightface.app import FaceAnalysis  # heavy import, keep lazy
 
-        providers, ctx_id = ort_providers(cfg)
+        providers, ctx_id, sess_options = ort_providers(cfg)
         names = [p[0] if isinstance(p, tuple) else p for p in providers]
         logger.info("Loading InsightFace '%s' (providers=%s)", cfg.face_model_name, names)
         try:
@@ -37,6 +37,7 @@ class InsightFaceModel:
                 root=cfg.face_model_root,
                 allowed_modules=["detection", "recognition"],
                 providers=providers,
+                **({"sess_options": sess_options} if sess_options is not None else {}),
             )
             self.app.prepare(ctx_id=ctx_id, det_thresh=cfg.det_thresh, det_size=cfg.det_sizes)
         except Exception as exc:  # noqa: BLE001 - surface any loader failure uniformly
@@ -61,7 +62,7 @@ class InsightFaceModel:
                     self.detector_device, self.recognizer_device, cfg.det_sizes, cfg.det_thresh)
 
     def warmup(self) -> None:
-        """Run once at every detector input size so CUDA kernels/arenas are initialised."""
+        """Run once at the largest detector input size so kernels/arenas are initialised."""
         h, w = max(s[1] for s in self.app.det_size), max(s[0] for s in self.app.det_size)
         self.detector.detect(np.zeros((h, w, 3), np.uint8), max_num=0)
         self.recognizer.get_feat([np.zeros((112, 112, 3), np.uint8)] * 4)

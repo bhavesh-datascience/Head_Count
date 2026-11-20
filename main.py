@@ -9,6 +9,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse
 
 from detector import PersonDetector
+from models.runtime import configure_threads
 from routes.unique_count import router as unique_count_router
 from services.unique_count_service import shutdown_runtime, start_runtime
 
@@ -21,6 +22,9 @@ detector: PersonDetector | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global detector
+    # Size PyTorch/OpenCV thread pools to the CPUs actually available before
+    # any model runs (matters on small CPU servers and in containers).
+    configure_threads()
     detector = PersonDetector()
     # Shared with /unique-count so the YOLO model is loaded only once.
     app.state.person_detector = detector

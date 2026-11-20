@@ -1,0 +1,43 @@
+# systemd unit for a CPU-only server (e.g. AWS t3.large: 2 vCPU, 8 GB RAM).
+#
+#   sudo cp deploy/facecount.service /etc/systemd/system/facecount.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now facecount
+#   journalctl -u facecount -f
+#
+# Adjust User, WorkingDirectory and the port to your server.
+
+[Unit]
+Description=FaceCount FastAPI Application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/var/www/facecount
+# One worker only: every worker loads its own copy of all models.
+ExecStart=/var/www/facecount/.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8001 --workers 1
+
+# --- Resource tuning ------------------------------------------------------
+# CPU defaults (smaller detection sizes, small batches, no warm-up spikes).
+Environment=UC_PROFILE=cpu
+# Fewer glibc malloc arenas -> memory is returned instead of hoarded per thread.
+Environment=MALLOC_ARENA_MAX=2
+# PyTorch OpenMP threads sleep when idle instead of spinning (saves CPU credits).
+Environment=OMP_WAIT_POLICY=PASSIVE
+# Queue limits: extra requests get HTTP 429 instead of piling up in RAM.
+Environment=UC_MAX_CONCURRENT_JOBS=1
+Environment=UC_MAX_PENDING_JOBS=4
+Environment=UC_MAX_IMAGES=100
+
+# Keep the service inside a memory budget so it can never take the whole
+# machine down. On an 8 GB instance: reclaim pressure at 6 GB, kill at 7 GB.
+MemoryHigh=6G
+MemoryMax=7G
+
+Restart=on-failure
+RestartSec=15
+# Model download + loading on first start can take a while.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

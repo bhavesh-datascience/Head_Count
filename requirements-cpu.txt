@@ -1,0 +1,25 @@
+# CPU-only install for servers without an NVIDIA GPU (e.g. AWS t3.large).
+# Uses the CPU builds of PyTorch and ONNX Runtime: ~1 GB on disk instead of
+# ~6 GB of CUDA libraries, and less RAM.
+#
+#   pip install -r requirements-cpu.txt
+#   uv pip install -r requirements-cpu.txt --no-config --index-strategy unsafe-best-match
+#
+# (--no-config is required with uv: pyproject.toml's GPU override would
+#  otherwise drop the CPU "onnxruntime" package.)
+#
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.14.1+cpu
+torchvision==0.29.1+cpu
+onnxruntime>=1.32.0
+
+fastapi>=0.162.0
+uvicorn[standard]>=0.54.0
+python-multipart>=0.0.32
+ultralytics>=8.4.189
+opencv-python>=5.0.0.93
+numpy>=2.5.4
+scikit-learn>=1.9.1
+insightface>=2.1
+psutil

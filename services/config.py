@@ -29,6 +29,23 @@ def _b(name: str, default: bool) -> bool:
     return os.getenv(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_profile() -> str:
+    """'gpu' or 'cpu'. UC_PROFILE=auto (default) picks cpu when no CUDA GPU is usable."""
+    raw = os.getenv("UC_PROFILE", "auto").strip().lower()
+    if raw in {"gpu", "cpu"}:
+        return raw
+    from models.runtime import has_cuda
+    return "gpu" if has_cuda() else "cpu"
+
+
+PROFILE = _resolve_profile()
+
+
+def _p(gpu, cpu):
+    """Default that depends on the hardware profile (env vars still override)."""
+    return gpu if PROFILE == "gpu" else cpu
+
+
 def _sizes(name: str, default: str) -> list[tuple[int, int]]:
     """Parse "640,1280" into [(640, 640), (1280, 1280)] (multi-scale SCRFD)."""
     raw = os.getenv(name, default)
@@ -37,13 +54,17 @@ def _sizes(name: str, default: str) -> list[tuple[int, int]]:
 
 @dataclass
 class UniqueCountConfig:
+    # "gpu" or "cpu": selects resource-appropriate defaults below (UC_PROFILE).
+    profile: str = PROFILE
+
     # ---- Upload / queue -------------------------------------------------
     allowed_extensions: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp")
     max_upload_bytes: int = field(default_factory=lambda: _i("UC_MAX_UPLOAD_MB", 20) * 1024 * 1024)
     max_images: int = field(default_factory=lambda: _i("UC_MAX_IMAGES", 500))
     # Images larger than this (longest side, px) are downscaled after decoding
     # to bound memory; 0 disables. Group photos need resolution for small faces.
-    max_image_side: int = field(default_factory=lambda: _i("UC_MAX_IMAGE_SIDE", 4096))
+    # CPU profile: 2560 px keeps faces of ~25 px+ while cutting work ~2.5x.
+    max_image_side: int = field(default_factory=lambda: _i("UC_MAX_IMAGE_SIDE", _p(4096, 2560)))
     # Number of dedicated worker threads that run the GPU pipeline, i.e. how
     # many jobs execute at once. 1 keeps GPU memory predictable.
     max_concurrent_jobs: int = field(default_factory=lambda: _i("UC_MAX_CONCURRENT_JOBS", 1))
@@ -63,13 +84,16 @@ class UniqueCountConfig:
     ort_gpu_mem_limit_mb: int = field(default_factory=lambda: _i("UC_ORT_GPU_MEM_MB", 0))
     # OSNet in FP16 on GPU (negligible accuracy impact, ~2x faster).
     osnet_fp16: bool = field(default_factory=lambda: _b("UC_OSNET_FP16", True))
+    # ONNX Runtime CPU memory arena: faster, but keeps the buffers of the
+    # largest image ever processed resident. Off by default on CPU.
+    ort_cpu_arena: bool = field(default_factory=lambda: _b("UC_ORT_CPU_ARENA", _p(True, False)))
     # Load and warm up all models in the background at server start.
     preload_models: bool = field(default_factory=lambda: _b("UC_PRELOAD_MODELS", True))
 
     # ---- InsightFace ----------------------------------------------------
     face_model_name: str = field(default_factory=lambda: os.getenv("UC_FACE_MODEL", "buffalo_l"))
     face_model_root: str = field(default_factory=lambda: os.getenv("UC_FACE_MODEL_ROOT", "~/.insightface"))
-    det_sizes: list[tuple[int, int]] = field(default_factory=lambda: _sizes("UC_DET_SIZES", "640,1280"))
+    det_sizes: list[tuple[int, int]] = field(default_factory=lambda: _sizes("UC_DET_SIZES", _p("640,1280", "960")))
     det_thresh: float = field(default_factory=lambda: _f("UC_DET_THRESH", 0.50))
     min_face_size: int = field(default_factory=lambda: _i("UC_MIN_FACE_SIZE", 20))
     # Faces whose quality score (0..1) is below this are kept (they are still
@@ -84,8 +108,8 @@ class UniqueCountConfig:
         "https://huggingface.co/kaiyangzhou/osnet/resolve/main/"
         "osnet_x1_0_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth",
     ))
-    reid_batch_size: int = field(default_factory=lambda: _i("UC_REID_BATCH", 32))
-    use_person_tiles: bool = field(default_factory=lambda: _b("UC_PERSON_TILES", True))
+    reid_batch_size: int = field(default_factory=lambda: _i("UC_REID_BATCH", _p(32, 8)))
+    use_person_tiles: bool = field(default_factory=lambda: _b("UC_PERSON_TILES", _p(True, False)))
     min_person_height: int = field(default_factory=lambda: _i("UC_MIN_PERSON_HEIGHT", 48))
 
     # ---- Identity matching ---------------------------------------------

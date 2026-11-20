@@ -21,12 +21,12 @@ A FastAPI service that counts people in photos, with a web UI.
 | Python | 3.13 | |
 | GPU | None (runs on CPU) | NVIDIA RTX 20-series or newer, **8 GB VRAM** (12 GB+ for comfortable headroom) |
 | NVIDIA driver | — | Version that supports CUDA 13 (580 or newer) |
-| Disk | ~6 GB (Python packages, CUDA libraries and models) | |
-| RAM | 8 GB | 16 GB |
+| Disk | ~2 GB (CPU install) / ~6 GB (GPU install, includes CUDA libraries) | |
+| RAM | 4 GB | 8 GB |
 
 You don't need to install the CUDA Toolkit or cuDNN yourself. They are installed as Python packages. You only need an up-to-date NVIDIA driver.
 
-**No GPU?** The service switches to the CPU automatically. It still works, but `/unique-count` is roughly 10–15× slower (about 2.5 s per image). AMD and Intel GPUs are not supported and are treated as "no GPU".
+**No GPU?** The service switches to the CPU automatically and uses lighter CPU settings (see [Deploying on a CPU server](#deploying-on-a-cpu-server-aws-t3large--t3xlarge)). On 2 CPU cores `/unique-count` takes about 3 s per image and uses about 1.6 GB of RAM at peak. AMD and Intel GPUs are not supported and are treated as "no GPU".
 
 Measured VRAM on an RTX 5070 Ti:
 
@@ -34,7 +34,7 @@ Measured VRAM on an RTX 5070 Ti:
 |---|---|
 | Models loaded, idle | ~1.9 GB |
 | Typical photos (1–2 MP) | ~3 GB peak |
-| Large photos (12 MP) | ~8 GB peak (temporary) |
+| Large photos (12 MP) | ~4.3 GB peak (temporary) |
 
 ---
 
@@ -74,7 +74,7 @@ pip uninstall -y onnxruntime
 pip install --force-reinstall --no-deps onnxruntime-gpu
 ```
 
-On a machine without an NVIDIA GPU you can use plain `onnxruntime` instead of `onnxruntime-gpu` and skip the last two commands.
+On a machine without an NVIDIA GPU, use `pip install -r requirements-cpu.txt` instead. It installs the much smaller CPU builds (see [Deploying on a CPU server](#deploying-on-a-cpu-server-aws-t3large--t3xlarge)).
 
 ### Model files
 
@@ -109,7 +109,75 @@ At startup the models load and warm up in the background, which takes a few seco
 curl http://localhost:8001/unique-count/status
 ```
 
-Look at `"devices"`: each model shows either `cuda` or `cpu`. `GET /health` shows the device that `/count` runs on.
+Look at `"devices"`: each model shows either `cuda` or `cpu`, and `"profile"` shows `gpu` or `cpu`. `GET /health` shows the device that `/count` runs on.
+
+---
+
+## Deploying on a CPU server (AWS t3.large / t3.xlarge)
+
+The service runs on a CPU-only machine with 2 vCPUs and 8 GB RAM (t3.large) or more (t3.xlarge: 4 vCPUs, 16 GB). Without a GPU it switches automatically to a **CPU profile**:
+
+- Faces are detected at one size, 960 px, instead of two (640 + 1280).
+- Images are downscaled to at most 2560 px.
+- No extra tiled person-detection pass in `/unique-count`.
+- Small batches.
+- Thread pools sized to the CPUs actually available.
+
+Every individual setting can still be overridden; see [Configuration](#configuration).
+
+Measured with CPU only on 2 cores (the same images and results before and after):
+
+| | Before optimisation | Now |
+|---|---|---|
+| Startup (models ready) | 76 s | 5 s |
+| RAM when idle | 2.1 GB | 1.0 GB |
+| RAM peak (12 MP photos) | 6.3 GB | 1.6 GB |
+| `/unique-count`, 3 normal photos | 243 s | 8.6 s |
+| `/unique-count`, 2 × 12 MP + 1 photo | 312 s | 9.6 s |
+| `/count`, one 12 MP photo | 15 s | 15 s |
+
+### Install (Ubuntu)
+
+```bash
+# System libraries needed by OpenCV
+sudo apt update && sudo apt install -y git libgl1 libglib2.0-0
+
+# uv (also provides Python 3.13 if the system Python is older)
+curl -LsSf https://astral.sh/uv/install.sh | sh && source ~/.bashrc
+
+git clone https://github.com/bhavesh-datascience/Head_Count.git /var/www/facecount
+cd /var/www/facecount
+uv venv --python 3.13
+# CPU builds of PyTorch / ONNX Runtime: about 1 GB instead of about 6 GB of CUDA libraries
+uv pip install -r requirements-cpu.txt --no-config --index-strategy unsafe-best-match
+```
+
+Plain pip works too: `python3.13 -m venv .venv && .venv/bin/pip install -r requirements-cpu.txt`.
+
+Don't run `uv sync` on a CPU server: it installs the GPU builds from `pyproject.toml`.
+
+### Run as a service
+
+[`deploy/facecount.service`](deploy/facecount.service) is a ready-made systemd unit. It does the following:
+
+- runs one worker
+- sets the CPU profile and the memory-saving environment variables
+- caps the service at 7 GB with `MemoryMax`, so it can never take the whole machine down
+- restarts the service if it crashes
+
+```bash
+sudo cp deploy/facecount.service /etc/systemd/system/facecount.service
+# edit User / WorkingDirectory / port in the file if yours differ
+sudo systemctl daemon-reload && sudo systemctl enable --now facecount
+journalctl -u facecount -f          # wait for "All /unique-count models ready"
+```
+
+### Tips for t3 instances
+
+- t3 instances are **burstable**: once their CPU credits run out they're throttled to 20% CPU. For steady traffic, turn on **T3 Unlimited** or use a non-burstable type such as c7i.large or c7i.xlarge.
+- Use a disk of at least 20 GB.
+- Use `async_mode=true` for `/unique-count` with many images, so proxies don't time out.
+- `/count` is the slowest call on CPU (about 15 s for a 12 MP photo). Each large photo is scanned in overlapping tiles to find small, distant people. For faster responses, send `tiles=false` with each request, or set `PERSON_MODEL=yolo11s.pt` (a smaller model that finds fewer small people).
 
 ---
 
@@ -182,6 +250,9 @@ All settings are optional environment variables.
 
 | Variable | Default | Description |
 |---|---|---|
+| `UC_PROFILE` | `auto` | `gpu` or `cpu` defaults. `auto` picks `cpu` when no CUDA GPU is available. |
+| `UC_CPU_THREADS` | `0` (auto) | Threads per inference library on CPU. Auto means the CPUs the process can use. |
+| `UC_ORT_CPU_ARENA` | GPU: `true`, CPU: `false` | Memory pool for the face models on CPU: slightly faster, but keeps peak memory resident |
 | `UC_REQUIRE_GPU` | `false` | Fail (503) instead of silently running on the CPU |
 | `UC_GPU_DEVICE` | `0` | GPU index |
 | `UC_ORT_GPU_MEM_MB` | `0` (no limit) | VRAM cap for the face models |
@@ -192,19 +263,24 @@ All settings are optional environment variables.
 | `UC_JOB_TTL_SECONDS` | `3600` | How long finished job results stay in memory |
 | `UC_MAX_IMAGES` | `500` | Maximum images per request |
 | `UC_MAX_UPLOAD_MB` | `20` | Maximum size per image |
-| `UC_MAX_IMAGE_SIDE` | `4096` | Larger images are downscaled to this |
+| `UC_MAX_IMAGE_SIDE` | GPU: `4096`, CPU: `2560` | Larger images are downscaled to this |
 | `UC_UPLOAD_DIR` | system temp | Where uploads are kept while a job runs |
-| `UC_DET_SIZES` | `640,1280` | Face-detection input sizes (multi-scale) |
+| `UC_DET_SIZES` | GPU: `640,1280`, CPU: `960` | Face-detection input sizes (comma-separated for multi-scale) |
 | `UC_DET_THRESH` | `0.50` | Minimum face-detection score |
 | `UC_MIN_FACE_SIZE` | `20` | Minimum face size in pixels |
 | `UC_FACE_STRONG` | `0.55` | Cosine similarity that counts as the same person |
 | `UC_FACE_WEAK` | `0.30` | Below this, faces are treated as different people |
 | `UC_CLUSTER_THRESHOLD` | `0.42` | Clustering merge threshold |
 | `UC_REID_ENABLED` | `true` | Use OSNet body Re-ID as supporting evidence |
+| `UC_REID_BATCH` | GPU: `32`, CPU: `8` | Person crops per Re-ID batch |
+| `UC_PERSON_TILES` | GPU: `true`, CPU: `false` | Extra tiled person-detection pass in `/unique-count` |
 | `UC_COUNT_BODY_ONLY` | `false` | Count people whose face is never visible |
 | `UC_FACE_MODEL_ROOT` | `~/.insightface` | Where InsightFace models are stored |
 | `UC_OSNET_WEIGHTS` | `weights/osnet_x1_0_msmt17.pth` | OSNet weights path |
-| `PERSON_MODEL` | `yolo11m.pt` | YOLO model for person detection |
+| `PERSON_MODEL` | `yolo11m.pt` | YOLO model for person detection (`yolo11s.pt` / `yolo11n.pt` are lighter; they download automatically) |
+| `PERSON_IMGSZ` | `1280` | YOLO input size for the full-image pass |
+| `PERSON_TILES` | `true` | Default for `/count`'s `tiles` parameter |
+| `PERSON_TILE_BATCH` | GPU: `16`, CPU: `2` | Tiles per YOLO batch. Lower uses less memory, and results are the same. |
 
 Example (PowerShell):
 
@@ -231,9 +307,11 @@ detector.py               YOLO person detector (shared, thread-safe)
 routes/unique_count.py    /unique-count HTTP endpoints
 services/                 pipeline: config, jobs/queue, model lifecycle,
                           face detection/recognition, Re-ID, matching
-models/                   InsightFace and OSNet wrappers, GPU setup
+models/                   InsightFace and OSNet wrappers, GPU and CPU/thread setup
 utils/                    image decoding/validation, similarity helpers
 templates/index.html      web UI
+deploy/facecount.service  systemd unit for a CPU server
+requirements-cpu.txt      CPU-only dependencies (servers without a GPU)
 ```
 
 ---
@@ -247,6 +325,9 @@ templates/index.html      web UI
 | First request is slow | The models are still loading or downloading. Check `GET /unique-count/status`. |
 | Out of GPU memory on very large photos | Lower `UC_MAX_IMAGE_SIDE` (for example to `2560`) or use a GPU with more VRAM. |
 | 429 `QUEUE_FULL` | Too many jobs at once. Retry later or raise `UC_MAX_PENDING_JOBS`. |
+| `oom-kill` in `journalctl` on a CPU server | Make sure the CPU install was used (`pip list` must not show `+cu130` or `nvidia-*` packages), run only one worker, and use `deploy/facecount.service`. On 4 GB machines also add swap. |
+| `ImportError: libGL.so.1` | `sudo apt install -y libgl1 libglib2.0-0` |
+| Very slow on a t3 after a while | CPU credits are used up. Turn on T3 Unlimited or use a non-burstable instance. |
 
 ## Limitations
 

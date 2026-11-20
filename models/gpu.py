@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import gc
 import logging
 import threading
 
@@ -16,6 +15,7 @@ import torch  # imported before onnxruntime so its CUDA DLLs are loaded first
 
 import onnxruntime
 
+from models.runtime import cpu_threads, ort_cpu_session_options, release_memory
 from services.config import UniqueCountConfig
 
 logger = logging.getLogger(__name__)
@@ -47,8 +47,8 @@ def ort_cuda_available() -> bool:
     return "CUDAExecutionProvider" in onnxruntime.get_available_providers()
 
 
-def ort_providers(cfg: UniqueCountConfig) -> tuple[list, int]:
-    """ONNX Runtime providers + InsightFace ctx_id (-1 = CPU)."""
+def ort_providers(cfg: UniqueCountConfig) -> tuple[list, int, object | None]:
+    """ONNX Runtime providers, InsightFace ctx_id (-1 = CPU) and session options."""
     init_cuda_runtime()
     # onnxruntime-gpu lists the CUDA provider even on machines with no usable
     # GPU; check for a real device first so we fall back to CPU cleanly
@@ -67,8 +67,8 @@ def ort_providers(cfg: UniqueCountConfig) -> tuple[list, int]:
         }
         if cfg.ort_gpu_mem_limit_mb > 0:
             opts["gpu_mem_limit"] = cfg.ort_gpu_mem_limit_mb * 1024 * 1024
-        return [("CUDAExecutionProvider", opts), "CPUExecutionProvider"], cfg.gpu_device_id
-    return ["CPUExecutionProvider"], -1
+        return [("CUDAExecutionProvider", opts), "CPUExecutionProvider"], cfg.gpu_device_id, None
+    return ["CPUExecutionProvider"], -1, ort_cpu_session_options(cpu_threads(), cfg.ort_cpu_arena)
 
 
 def session_device(session) -> str:
@@ -99,7 +99,5 @@ def gpu_info(device_id: int = 0) -> dict:
 
 
 def release_gpu_memory() -> None:
-    """Return cached PyTorch blocks to the driver after a job."""
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    """Free cached memory after a job (CUDA cache, Python garbage, glibc arenas)."""
+    release_memory()

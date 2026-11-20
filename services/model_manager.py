@@ -100,7 +100,9 @@ class ModelManager:
                 reid = PersonReIdentifier(self.person_detector, osnet, self.cfg)
                 # First YOLO call on GPU builds kernels for the full-image and
                 # tile input shapes; do it now instead of on the first request.
-                self.person_detector.detect(np.zeros((1080, 1920, 3), np.uint8), self.cfg.use_person_tiles)
+                # On CPU there is nothing to compile, so skip the cost.
+                if self.cfg.profile == "gpu":
+                    self.person_detector.detect(np.zeros((1080, 1920, 3), np.uint8), self.cfg.use_person_tiles)
             except ModelInitializationError as exc:
                 reid_error = str(exc)
         if reid_error:
@@ -128,6 +130,7 @@ class ModelManager:
                 if isinstance(self.person_detector.device, int) else str(self.person_detector.device)
         return {
             "state": state.value,
+            "profile": self.cfg.profile,
             "error": error,
             "load_seconds": self.load_seconds,
             "reid_enabled": self.reid is not None,
